@@ -1,0 +1,20 @@
+# Dependency directories
+node_modules/
+
+# Build artifacts
+dist/
+release/
+
+# Log files
+*.log
+logs/
+
+# Environment variables
+.env
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Electron-builder cache
+.electron-builder
