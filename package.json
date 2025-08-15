@@ -1,6 +1,6 @@
 {
   "name": "swarmfm-player",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Swarm FM Player",
   "main": "main.js",
   "scripts": {

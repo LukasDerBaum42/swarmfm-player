@@ -491,7 +491,7 @@ app.whenReady().then(() => {
         },
         { 
           label: 'Report Issue',
-          click: () => shell.openExternal('https://github.com/swarmfm/player/issues')
+          click: () => shell.openExternal('https://github.com/LukasDerBaum42/swarmfm-player/issues')
         },
         { type: 'separator' },
         { role: 'toggleDevTools' },
@@ -522,7 +522,7 @@ app.whenReady().then(() => {
         },
         { 
           label: 'Documentation',
-          click: () => shell.openExternal('https://github.com/swarmfm/player/wiki')
+          click: () => shell.openExternal('https://github.com/LukasDerBaum42/swarmfm-player/wiki')
         },
         { type: 'separator' },
         { 
