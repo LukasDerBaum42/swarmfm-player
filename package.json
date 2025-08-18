@@ -2,7 +2,7 @@
   "name": "swarmfm-player",
   "version": "1.0.3",
   "description": "Swarm FM Player",
-  "main": "main.js",
+  "main": "src/main.js",
   "scripts": {
     "start": "electron .",
     "build": "electron-builder -wl",
@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "electron-log": "^5.1.0",
+    "electron-store": "^8.0.1",
     "electron-updater": "^6.1.7",
     "electron-window-state": "^5.0.3"
   },

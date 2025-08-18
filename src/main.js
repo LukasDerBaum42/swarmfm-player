@@ -1,24 +1,20 @@
-const { app, BrowserWindow, Tray, Menu, shell, net, ipcMain } = require('electron');
+const { app, BrowserWindow, Tray, Menu, shell, net, ipcMain, session } = require('electron');
 const path = require('path');
 const windowStateKeeper = require('electron-window-state');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
-
-// Configure logging
-log.transports.file.level = 'info';
-autoUpdater.logger = log;
-
-// Disable hardware acceleration to prevent Steam conflicts
-app.disableHardwareAcceleration();
-
-// Disable GPU process to prevent crashes
-app.commandLine.appendSwitch('disable-gpu');
-app.commandLine.appendSwitch('disable-software-rasterizer');
-
-let win = null;
+// Remove electron-store since it's not needed for this player
+let mainWindow = null;
 let tray = null;
 let reloadTimeout = null;
 let isOnline = true;
+
+// URLs configuration
+const PLAYER_URL = 'https://player.sw.arm.fm/';
+const STATUS_URL = 'https://status.sw.arm.fm/';
+const DISCORD_URL = 'https://discord.gg/SyHegkDmeF';
+const ICON_ONLINE = path.join(__dirname, 'icon.png');
+const ICON_OFFLINE = path.join(__dirname, 'icon-offline.png');
 
 // Single instance lock
 const gotTheLock = app.requestSingleInstanceLock();
@@ -26,14 +22,20 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (win) {
-      if (win.isMinimized()) win.restore();
-      win.focus();
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
     }
   });
 }
 
-function createWindow() {
+function updateTrayStatus(isOnline) {
+  if (!tray) return;
+  tray.setImage(isOnline ? ICON_ONLINE : ICON_OFFLINE);
+  tray.setToolTip(`Swarm FM Player - ${isOnline ? "Online" : "Offline"}`);
+}
+
+function createMainWindow() {
   // Clear any existing reload timeout
   if (reloadTimeout) {
     clearTimeout(reloadTimeout);
@@ -46,14 +48,14 @@ function createWindow() {
     defaultHeight: 600
   });
 
-  // Create browser window with more stable configuration
-  win = new BrowserWindow({
+  // Create main browser window
+  mainWindow = new BrowserWindow({
     x: mainWindowState.x,
     y: mainWindowState.y,
     width: mainWindowState.width,
     height: mainWindowState.height,
-    icon: path.join(__dirname, 'icon.png'),
-    show: false, // Don't show until content is loaded
+    icon: ICON_ONLINE,
+    show: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -67,40 +69,93 @@ function createWindow() {
   });
 
   // Manage window state
-  mainWindowState.manage(win);
+  mainWindowState.manage(mainWindow);
 
-  // Handle minimize event safely
-  win.on('minimize', (event) => {
+  // Handle minimize event
+  mainWindow.on('minimize', (event) => {
     event.preventDefault();
-    if (win && !win.isDestroyed()) {
-      win.hide();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.hide();
     }
   });
 
   // Handle window closed event
-  win.on('closed', () => {
+  mainWindow.on('closed', () => {
     if (reloadTimeout) {
       clearTimeout(reloadTimeout);
       reloadTimeout = null;
     }
-    win = null;
+    mainWindow = null;
   });
 
-  // Load player with robust error handling
+  // Media session integration
+  mainWindow.webContents.on('did-finish-load', () => {
+    mainWindow.webContents.executeJavaScript(`
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.setActionHandler('play', () => {
+          document.querySelector('[data-action="play"], .play')?.click();
+        });
+        navigator.mediaSession.setActionHandler('pause', () => {
+          document.querySelector('[data-action="pause"], .pause')?.click();
+        });
+      }
+    `);
+  });
+
+  // Session persistence
+  const ses = mainWindow.webContents.session;
+  ses.clearStorageData();
+  ses.setPermissionRequestHandler((webContents, permission, callback) => {
+    callback(permission === 'notifications');
+  });
+
+  // Enhanced network detection
+  const checkNetworkStatus = () => {
+    const newStatus = net.isOnline();
+    if (newStatus !== isOnline) {
+      isOnline = newStatus;
+      console.log(`Network status changed: ${isOnline ? 'Online' : 'Offline'}`);
+      updateTrayStatus(isOnline);
+      
+      if (!isOnline) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          showOfflinePage();
+        }
+      } else if (isOnline && mainWindow && !mainWindow.isDestroyed() && 
+                mainWindow.webContents.getURL().startsWith('data:text/html')) {
+        loadPlayer();
+      }
+    }
+  };
+
+  // Initial network status
+  isOnline = net.isOnline();
+  updateTrayStatus(isOnline);
+  
+  // Check network status every 5 seconds
+  const networkCheckInterval = setInterval(checkNetworkStatus, 5000);
+  mainWindow.on('closed', () => clearInterval(networkCheckInterval));
+
+  // Load player
   const loadPlayer = () => {
     if (!isOnline) {
       showOfflinePage();
       return;
     }
 
-    win.loadURL('https://player.sw.arm.fm/', {
-      userAgent: win.webContents.getUserAgent() + ' SwarmFMElectron/1.0'
+    mainWindow.loadURL(PLAYER_URL, {
+      userAgent: mainWindow.webContents.getUserAgent() + ' SwarmFMElectron/1.0',
+      extraHeaders: "Content-Security-Policy: default-src 'self' https://*.sw.arm.fm; " +
+                   "script-src 'self' 'unsafe-inline' https://*.sw.arm.fm; " +
+                   "style-src 'self' 'unsafe-inline' https://*.sw.arm.fm; " +
+                   "img-src 'self' https://*.sw.arm.fm data:; " +
+                   "media-src https://*.sw.arm.fm; " +
+                   "connect-src https://*.sw.arm.fm;"
     })
       .then(() => {
         console.log('Player loaded successfully');
-        win.show(); // Show window only after successful load
+        mainWindow.show();
         
-        // Clear any pending reload
         if (reloadTimeout) {
           clearTimeout(reloadTimeout);
           reloadTimeout = null;
@@ -113,7 +168,7 @@ function createWindow() {
   };
 
   const showErrorPage = (err) => {
-    win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
+    mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
       <!DOCTYPE html>
       <html>
       <head>
@@ -191,7 +246,6 @@ function createWindow() {
             text-align: left;
             color: #ff9999;
             display: none;
-            width: 100%;
           }
           .show-details {
             color: #aaa;
@@ -234,7 +288,7 @@ function createWindow() {
           
           <div class="button-group">
             <button id="retry-btn" onclick="window.retryLoad()">↻ Reload Player</button>
-            <button onclick="window.openExternal('https://status.sw.arm.fm')">🛟 Check Status</button>
+            <button onclick="window.openExternal('${STATUS_URL}')">🛟 Check Status</button>
           </div>
           
           <div class="show-details" onclick="document.querySelector('.error-details').style.display = 'block'; this.style.display = 'none'">
@@ -290,16 +344,16 @@ function createWindow() {
       </html>
     `)}`);
 
-    win.show(); // Show error page
+    mainWindow.show();
     
     // Schedule reload only if window still exists
-    if (!win.isDestroyed()) {
+    if (!mainWindow.isDestroyed()) {
       reloadTimeout = setTimeout(loadPlayer, 10000);
     }
   };
 
   const showOfflinePage = () => {
-    win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
+    mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
       <!DOCTYPE html>
       <html>
       <head>
@@ -389,50 +443,28 @@ function createWindow() {
       </html>
     `)}`);
     
-    win.show();
+    mainWindow.show();
     
     // Schedule retry with exponential backoff
     const retryDelay = Math.min(30000, 1000 * Math.pow(2, reloadTimeout ? 3 : 1));
     reloadTimeout = setTimeout(loadPlayer, retryDelay);
   };
 
-  // Network status monitoring
-  const checkNetworkStatus = () => {
-    const newStatus = net.isOnline();
-    if (newStatus !== isOnline) {
-      isOnline = newStatus;
-      console.log(`Network status changed: ${isOnline ? 'Online' : 'Offline'}`);
-      
-      if (!isOnline) {
-        if (win && !win.isDestroyed()) {
-          showOfflinePage();
-        }
-      } else if (win && !win.isDestroyed() && win.webContents.getURL().startsWith('data:text/html')) {
-        loadPlayer();
-      }
-    }
-  };
-
-  // Initial network status
-  isOnline = net.isOnline();
-  
-  // Check network status every 5 seconds
-  const networkCheckInterval = setInterval(checkNetworkStatus, 5000);
-  win.on('closed', () => clearInterval(networkCheckInterval));
-
-  // Restrict navigation to the same domain
-  win.webContents.on('will-navigate', (event, url) => {
-    const currentUrl = win.webContents.getURL();
-    const targetHost = new URL(url).hostname;
+  // Restrict navigation
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const parsedUrl = new URL(url);
     const allowedHosts = ['player.sw.arm.fm', 'sw.arm.fm'];
     
-    if (!allowedHosts.includes(targetHost) && !currentUrl.startsWith('data:text/html')) {
+    if (!allowedHosts.includes(parsedUrl.hostname)) {
       event.preventDefault();
+      if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
+        shell.openExternal(url);
+      }
     }
   });
 
   // Handle external links
-  win.webContents.setWindowOpenHandler(({ url }) => {
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     // Handle Discord links specially
     if (url.includes('discord.gg/') || url.includes('discord.com/')) {
       // Try Discord app first
@@ -440,7 +472,7 @@ function createWindow() {
       
       // Fallback to web after delay
       setTimeout(() => {
-        shell.openExternal('https://discord.gg/SyHegkDmeF');
+        shell.openExternal(DISCORD_URL);
       }, 300);
     } else {
       shell.openExternal(url);
@@ -449,8 +481,21 @@ function createWindow() {
   });
 
   // Prevent crashes on failed resources
-  win.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
     console.warn('Resource failed to load:', errorDescription);
+  });
+
+  // Performance monitoring
+  mainWindow.webContents.on('did-finish-load', () => {
+    setInterval(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.getProcessMemoryInfo().then(info => {
+          if (info.privateBytes > 500000000) { // 500MB
+            mainWindow.webContents.reloadIgnoringCache();
+          }
+        });
+      }
+    }, 60000); // Check every minute
   });
 
   // Start loading
@@ -458,8 +503,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  // Create window after a short delay for stability
-  setTimeout(createWindow, 100);
+  // Create main window after a short delay
+  setTimeout(createMainWindow, 100);
   
   // Set up application menu
   const template = [
@@ -469,23 +514,20 @@ app.whenReady().then(() => {
         { 
           label: 'Reload Player',
           accelerator: 'CmdOrCtrl+R',
-          click: () => win && !win.isDestroyed() && win.reload()
+          click: () => mainWindow && !mainWindow.isDestroyed() && mainWindow.reload()
         },
         { 
           label: 'Force Reload',
           accelerator: 'CmdOrCtrl+Shift+R',
-          click: () => win && !win.isDestroyed() && win.webContents.reloadIgnoringCache()
+          click: () => mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.reloadIgnoringCache()
         },
         { type: 'separator' },
         { 
           label: 'Swarm FM Discord',
           click: () => {
-            // Try Discord app first
             shell.openExternal(`discord://discord.gg/SyHegkDmeF`);
-            
-            // Fallback to web after delay
             setTimeout(() => {
-              shell.openExternal('https://discord.gg/SyHegkDmeF');
+              shell.openExternal(DISCORD_URL);
             }, 300);
           }
         },
@@ -528,8 +570,8 @@ app.whenReady().then(() => {
         { 
           label: 'About Swarm FM Player',
           click: () => {
-            if (win && !win.isDestroyed()) {
-              win.webContents.send('show-about');
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('show-about');
             }
           }
         }
@@ -541,20 +583,41 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(menu);
 
   // Set up system tray
-  tray = new Tray(path.join(__dirname, 'icon.png'));
+  tray = new Tray(ICON_ONLINE);
   tray.setToolTip('Swarm FM Player');
   
   const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Pause/Play',
+      click: () => {
+        try {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.executeJavaScript(`
+              // Try to find a pause or play button and click it
+              const pauseBtn = document.querySelector('[data-action="pause"], .pause, .fa-pause, [title="Pause"]');
+              const playBtn = document.querySelector('[data-action="play"], .play, .fa-play, [title="Play"]');
+              if (pauseBtn && pauseBtn.offsetParent !== null) {
+                pauseBtn.click();
+              } else if (playBtn && playBtn.offsetParent !== null) {
+                playBtn.click();
+              }
+            `);
+          }
+        } catch (error) {
+          console.error('Error toggling pause/play:', error);
+        }
+      }
+    },
     { 
       label: 'Show Player', 
       click: () => {
         try {
-          if (win && !win.isDestroyed()) {
-            if (win.isMinimized()) win.restore();
-            win.show();
-            win.focus();
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.show();
+            mainWindow.focus();
           } else {
-            createWindow();
+            createMainWindow();
           }
         } catch (error) {
           console.error('Error showing player:', error);
@@ -565,7 +628,7 @@ app.whenReady().then(() => {
       label: 'Hide Player', 
       click: () => {
         try {
-          if (win && !win.isDestroyed()) win.hide();
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
         } catch (error) {
           console.error('Error hiding player:', error);
         }
@@ -575,7 +638,7 @@ app.whenReady().then(() => {
       label: 'Reload Player', 
       click: () => {
         try {
-          if (win && !win.isDestroyed()) win.reload();
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.reload();
         } catch (error) {
           console.error('Error reloading player:', error);
         }
@@ -588,7 +651,7 @@ app.whenReady().then(() => {
         try {
           shell.openExternal(`discord://discord.gg/SyHegkDmeF`);
           setTimeout(() => {
-            shell.openExternal('https://discord.gg/SyHegkDmeF');
+            shell.openExternal(DISCORD_URL);
           }, 300);
         } catch (error) {
           console.error('Error opening Discord:', error);
@@ -602,8 +665,8 @@ app.whenReady().then(() => {
     { 
       label: 'Developer Tools', 
       click: () => {
-        if (win && !win.isDestroyed()) {
-          win.webContents.openDevTools({ mode: 'detach' });
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.openDevTools({ mode: 'detach' });
         }
       }
     },
@@ -615,15 +678,15 @@ app.whenReady().then(() => {
   // Tray click behavior
   tray.on('click', () => {
     try {
-      if (!win || win.isDestroyed()) return createWindow();
+      if (!mainWindow || mainWindow.isDestroyed()) return createMainWindow();
       
-      if (win.isMinimized()) {
-        win.restore();
-        win.show();
-      } else if (!win.isVisible()) {
-        win.show();
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+        mainWindow.show();
+      } else if (!mainWindow.isVisible()) {
+        mainWindow.show();
       } else {
-        win.hide();
+        mainWindow.hide();
       }
     } catch (error) {
       console.error('Error handling tray click:', error);
@@ -640,27 +703,27 @@ app.whenReady().then(() => {
   
   autoUpdater.on('update-available', (info) => {
     console.log('Update available', info.version);
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('update-available');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('update-available');
     }
   });
   
   autoUpdater.on('update-not-available', () => {
     console.log('No update available');
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('update-not-available');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('update-not-available');
     }
   });
   
   autoUpdater.on('update-downloaded', (info) => {
     console.log('Update downloaded', info.version);
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('update-downloaded');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('update-downloaded');
     }
     
     // Notify user and install on next restart
     const dialog = require('electron').dialog;
-    dialog.showMessageBox(win, {
+    dialog.showMessageBox(mainWindow, {
       type: 'info',
       title: 'Update Ready',
       message: `Version ${info.version} has been downloaded. Restart the application to apply the update?`,
@@ -674,8 +737,8 @@ app.whenReady().then(() => {
   
   autoUpdater.on('error', (err) => {
     console.error('Updater error:', err);
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('update-error', err.message);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('update-error', err.message);
     }
   });
   
@@ -684,9 +747,9 @@ app.whenReady().then(() => {
 });
 
 // Handle IPC events
-ipcMain.handle('retry-load', () => {
-  if (win && !win.isDestroyed()) {
-    win.reload();
+ipcMain.on('retry-load', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.reload();
   }
 });
 
@@ -694,14 +757,9 @@ ipcMain.handle('retry-load', () => {
 app.on('render-process-gone', (event, webContents, details) => {
   console.error('Renderer process crashed:', details);
   event.preventDefault();
-  if (win && !win.isDestroyed()) {
-    win.reload();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.reload();
   }
-});
-
-app.on('child-process-gone', (event, details) => {
-  console.error('Child process gone:', details);
-  event.preventDefault();
 });
 
 app.on('window-all-closed', () => {
@@ -711,8 +769,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-  if (!win || win.isDestroyed()) {
-    createWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow();
   }
 });
 
