@@ -1,12 +1,12 @@
 {
   "name": "swarmfm-player",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Swarm FM Player",
   "main": "main.js",
   "scripts": {
-  "start": "electron .",
-  "build": "electron-builder ",
-  "release": "electron-builder build --publish always"
+    "start": "electron .",
+    "build": "electron-builder -wl",
+    "release": "electron-builder build --publish always"
   },
   "repository": {
     "type": "git",
@@ -15,8 +15,8 @@
   "author": "LukasDerBaum",
   "license": "GPL-3.0",
   "devDependencies": {
-    "electron": "^29.4.6",
-    "electron-builder": "^24.13.3"
+    "electron": "^29.0.0",
+    "electron-builder": "^24.9.1"
   },
   "dependencies": {
     "electron-log": "^5.1.0",
@@ -31,18 +31,26 @@
       "owner": "LukasDerBaum42",
       "repo": "swarmfm-player"
     },
+    "files": [
+      "**/*",
+      "!node_modules/**/*",
+      "build/icon.png"
+    ],
+    "directories": {
+      "buildResources": "build"
+    },
     "win": {
       "target": "nsis",
-      "icon": "icon.png"
+      "icon": "build/icon.png"
     },
     "mac": {
       "target": "dmg",
-      "icon": "icon.png",
+      "icon": "build/icon.png",
       "category": "public.app-category.music"
     },
     "linux": {
       "target": "AppImage",
-      "icon": "icon.png",
+      "icon": "build/icon.png",
       "category": "Audio"
     }
   }
